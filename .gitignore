@@ -11,6 +11,3 @@ bin/big-lama.pt
 *.pth
 *.onnx
 
-dist/
-*.exe
-*.spec
