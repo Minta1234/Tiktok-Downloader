@@ -41,6 +41,7 @@ Find similar images in your local library.
 *   **Live Draw**: Add drawings or annotations directly onto video frames.
 
 ### **BuildInstaller**
+* **Make EXE**:Use pyinstaller
 * **installer**: Use inno Setup compiler For Build installer.
 ---
 
