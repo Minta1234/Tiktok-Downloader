@@ -62,7 +62,8 @@ Find similar images in your local library.
 ### Prerequisites
 *   Windows 10/11 (Recommended)
 *   Python 3.10 or higher
-*   NVIDIA GPU with 4GB+ VRAM (Optional, for 10x faster AI processing)
+*   NVIDIA GPU with 4GB+ VRAM (Optional, for 10x faster AI processing) Or Use CPU But Slowly Process
+  
 
 ### Installation
 1.  Clone the repository:
