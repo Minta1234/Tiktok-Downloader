@@ -1,5 +1,46 @@
 import os
 import sys
+import subprocess
+import shutil
+import glob
+import json
+import psutil
+import re
+import requests
+import io
+import time
+import threading
+from PIL import Image, ImageTk, ImageDraw
+
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+def find_tool(name):
+    """Search for tool in sys._MEIPASS/bin, PATH, C:\Tools, and {app}\bin"""
+    bundled_bin = get_resource_path("bin")
+    if os.path.exists(bundled_bin):
+        for root, dirs, files in os.walk(bundled_bin):
+            if f"{name}.exe" in files: return os.path.join(root, f"{name}.exe")
+            if name in files: return os.path.join(root, name)
+    path = shutil.which(name)
+    if path: return path
+    search_dirs = [
+        "C:\\Tools",
+        os.path.join(os.path.dirname(sys.executable), "bin"),
+        os.path.abspath("bin"),
+        os.path.join(os.path.expanduser("~"), "Downloads")
+    ]
+    for d in search_dirs:
+        if not os.path.exists(d): continue
+        for root, dirs, files in os.walk(d):
+            if f"{name}.exe" in files: return os.path.join(root, f"{name}.exe")
+            if name in files: return os.path.join(root, name)
+    return None
 
 # --- RUNTIME PATH FIXER (for PyInstaller frozen app) ---
 if getattr(sys, 'frozen', False):
@@ -50,15 +91,49 @@ from PIL import Image, ImageTk, ImageDraw
 class HardwareManager:
     @staticmethod
     def get_info():
+        # Check torch first
         has_cuda = HAS_TORCH and torch.cuda.is_available()
-        info = {
+        gpu_name = torch.cuda.get_device_name(0) if has_cuda else "None"
+        
+        # Fallback to Vulkan/Real-ESRGAN
+        if not has_cuda:
+            try:
+                exe = find_tool("realesrgan-ncnn-vulkan")
+                if exe:
+                    # Search for any jpg in bin to use as probe
+                    bin_dir = os.path.dirname(os.path.abspath(exe))
+                    j_files = glob.glob(os.path.join(bin_dir, "*.jpg"))
+                    probe_in = j_files[0] if j_files else "null"
+                    
+                    # Probe command (try to get GPU list)
+                    # We use a 5s timeout for laptop GPU spin-up
+                    proc = subprocess.run([exe, "-v", "-i", probe_in, "-o", "temp_probe.png"], 
+                                         capture_output=True, text=True, timeout=5,
+                                         cwd=bin_dir)
+                    
+                    combined = (proc.stdout or "") + (proc.stderr or "")
+                    # Match pattern: [0 NVIDIA GeForce RTX 3050 Laptop GPU]
+                    match = re.search(r"\[\d+\s+(.*?)\]", combined)
+                    if match:
+                        gpu_name = match.group(1)
+                        has_cuda = True
+                    
+                    if os.path.exists(os.path.join(bin_dir, "temp_probe.png")):
+                        os.remove(os.path.join(bin_dir, "temp_probe.png"))
+            except: pass
+
+        return {
             "has_cuda": has_cuda,
-            "gpu_name": torch.cuda.get_device_name(0) if has_cuda else "None",
+            "gpu_name": gpu_name,
             "memory": f"{psutil.virtual_memory().total // (1024**3)} GB"
         }
-        return info
 
 GLOBAL_HW = HardwareManager.get_info()
+
+def check_ai_ready():
+    """Check if AI is ready (either auto-detected or manually forced)."""
+    if GLOBAL_SETTINGS.get("force_gpu"): return True
+    return GLOBAL_HW.get("has_cuda", False)
 
 # --- SETTINGS MANAGER (Persistence) ---
 class SettingsManager:
@@ -66,6 +141,7 @@ class SettingsManager:
         self.settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
         self.defaults = {
             "prefer_gpu": True,
+            "force_gpu": False,
             "batch_size": 4
         }
         self.settings = self._load()
@@ -231,7 +307,7 @@ class ImageFinderTab(tk.Frame):
             return
         self.is_searching = True
         self.is_cancelled = False
-        self.search_btn.config(text="⌛ SEARCHING...", state="disabled", bg="#444")
+        self.search_btn.config(text="⌛ PROCESSING...", state="disabled", bg="#444")
         self.cancel_btn.pack(fill="x", pady=(10, 0)) # Show cancel button
         self.res_listbox.delete(0, tk.END)
         self.results = []
@@ -302,7 +378,7 @@ class ImageFinderTab(tk.Frame):
             self.results = matches
             self.after(0, self._update_res_ui)
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Error", str(e)))
             self.after(0, lambda: self.search_btn.config(text="🔍  FIND SIMILAR IMAGES", state="normal", bg=ACCENT))
             self.after(0, lambda: self.cancel_btn.pack_forget()) # Hide cancel
             self.is_searching = False
@@ -425,13 +501,13 @@ class TiktokTranslatorTab(tk.Frame):
 
             if mode == "desc":
                 self.after(0, lambda: self.status_var.set("🔍 Extracting metadata..."))
-                cmd = [ytdlp, "--dump-json", "--skip-download", url]
+                cmd = [ytdlp] + get_ytdlp_base_args() + ["--dump-json", "--skip-download", url]
                 proc = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True, encoding='utf-8')
                 data = json.loads(proc.stdout)
                 source_text = data.get("description") or data.get("title", "")
             else:
                 self.after(0, lambda: self.status_var.set("🎵 Downloading audio..."))
-                subprocess.run([ytdlp, "-x", "--audio-format", "mp3", "-o", temp_audio, url], startupinfo=si, check=True)
+                subprocess.run([ytdlp] + get_ytdlp_base_args() + ["-x", "--audio-format", "mp3", "-o", temp_audio, url], startupinfo=si, check=True)
                 self.after(0, lambda: self.status_var.set("🤖 AI Transcribing (Whisper)..."))
                 model = whisper.load_model("base")
                 result = model.transcribe(temp_audio)
@@ -448,7 +524,7 @@ class TiktokTranslatorTab(tk.Frame):
                 self.status_var.set("Done ✓")
             self.after(0, done)
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Error", str(e)))
             self.trans_btn.config(state="normal", text="🚀  START TRANSLATION")
         finally:
             if os.path.exists(temp_audio): os.remove(temp_audio)
@@ -521,7 +597,7 @@ class TikTokImageAgentTab(tk.Frame):
     def _fetch_metadata(self):
         url = self.url_var.get().strip()
         if not url: return
-        self.fetch_btn.config(state="disabled", text="⌛ READING METADATA...")
+        self.fetch_btn.config(state="disabled", text="⌛ PROCESSING...")
         self.status_var.set("Scanning TikTok for hidden data...")
         threading.Thread(target=self._fetch_thread, args=(url,), daemon=True).start()
 
@@ -583,7 +659,7 @@ class TikTokImageAgentTab(tk.Frame):
 
             self.after(0, update_ui)
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Agent Error", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Agent Error", str(e)))
             self.after(0, lambda: self.fetch_btn.config(state="normal", text="🔍 SCAN METADATA & EXTRACT"))
             self.after(0, lambda: self.status_var.set("Scanning failed ❌"))
 
@@ -825,6 +901,9 @@ class TikTokFrameUpscalerTab(tk.Frame):
         self.hour_var     = tk.StringVar(value="00")
         self.min_var      = tk.StringVar(value="00")
         self.sec_var      = tk.StringVar(value="00")
+        self.end_h_var    = tk.StringVar(value="00")
+        self.end_m_var    = tk.StringVar(value="00")
+        self.end_s_var    = tk.StringVar(value="00")
         self.upscale_var  = tk.StringVar(value="🔺 2x (Fast)")
         self.is_active    = False
         self._build_ui()
@@ -852,13 +931,19 @@ class TikTokFrameUpscalerTab(tk.Frame):
         # Time Offset (New Feature)
         tk.Label(card, text="⏰  Start Time (HH:MM:SS)", font=("Segoe UI", 10, "bold"), fg=ACCENT2, bg=BG2, anchor="w").pack(fill="x")
         t_row = tk.Frame(card, bg=BG2)
-        t_row.pack(fill="x", pady=(4, 12))
-        
+        t_row.pack(fill="x", pady=(4, 8))
         for var in [self.hour_var, self.min_var, self.sec_var]:
-            e = tk.Entry(t_row, textvariable=var, font=("Consolas", 11), bg=BG3, fg=TEXT, width=4, relief="flat", justify="center")
-            e.pack(side="left", padx=(0, 5))
-            if var != self.sec_var:
-                tk.Label(t_row, text=":", bg=BG2, fg=TEXT).pack(side="left", padx=(0, 5))
+            tk.Entry(t_row, textvariable=var, font=("Consolas", 11), bg=BG3, fg=TEXT, width=4, relief="flat", justify="center").pack(side="left", padx=(0, 5))
+            if var != self.sec_var: tk.Label(t_row, text=":", bg=BG2, fg=TEXT).pack(side="left", padx=(0, 5))
+
+        tk.Label(card, text="⌛  End Time (HH:MM:SS)", font=("Segoe UI", 10, "bold"), fg=WARN, bg=BG2, anchor="w").pack(fill="x")
+        e_row = tk.Frame(card, bg=BG2)
+        e_row.pack(fill="x", pady=(4, 12))
+        for var in [self.end_h_var, self.end_m_var, self.end_s_var]:
+            tk.Entry(e_row, textvariable=var, font=("Consolas", 11), bg=BG3, fg=TEXT, width=4, relief="flat", justify="center").pack(side="left", padx=(0, 5))
+            if var != self.end_s_var: tk.Label(e_row, text=":", bg=BG2, fg=TEXT).pack(side="left", padx=(0, 5))
+
+        tk.Label(card, text="(Leave all at 00:00:00 to extract ALL frames)", font=("Segoe UI", 8), fg=SUBTEXT, bg=BG2).pack(anchor="w", pady=(0, 10))
         tk.Label(card, text="📁  Save Frames To", font=("Segoe UI", 10, "bold"), fg=ACCENT2, bg=BG2, anchor="w").pack(fill="x")
         pf = tk.Frame(card, bg=BG3)
         pf.pack(fill="x", pady=(4, 12))
@@ -885,7 +970,7 @@ class TikTokFrameUpscalerTab(tk.Frame):
         url = self.url_entry.get().strip()
         if not url: return
         self.is_active = True
-        self.dl_btn.config(text="⏳ WORKING...", state="disabled", bg="#444")
+        self.dl_btn.config(text="⌛ PROCESSING...", state="disabled", bg="#444")
         self.is_cancelled = False
         self.current_proc = None
         self.cancel_btn.pack(fill="x", pady=(10, 0))
@@ -919,26 +1004,40 @@ class TikTokFrameUpscalerTab(tk.Frame):
                 si = subprocess.STARTUPINFO()
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-            subprocess.run([ytdlp, url, "--format", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", temp_vid], startupinfo=si, check=True)
+            subprocess.run([ytdlp] + get_ytdlp_base_args() + [url, "--format", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", temp_vid], startupinfo=si, check=True)
             
             # Find the actual downloaded file (yt-dlp might change extension)
             downloaded_files = glob.glob(os.path.join(output_dir, "temp.*"))
             if not downloaded_files: raise Exception("Download failed, no file found")
             actual_temp_vid = downloaded_files[0]
 
-            # Construct Time Offset
-            hh, mm, ss = self.hour_var.get().zfill(2), self.min_var.get().zfill(2), self.sec_var.get().zfill(2)
-            time_offset = f"{hh}:{mm}:{ss}"
+            # Construct Time Range
+            sh, sm, ss = self.hour_var.get().zfill(2), self.min_var.get().zfill(2), self.sec_var.get().zfill(2)
+            eh, em, es = self.end_h_var.get().zfill(2), self.end_m_var.get().zfill(2), self.end_s_var.get().zfill(2)
+            
+            start_ts = f"{sh}:{sm}:{ss}"
+            end_ts = f"{eh}:{em}:{es}"
+            
+            is_full = (start_ts == "00:00:00" and end_ts == "00:00:00")
+            
+            if is_full:
+                self.after(0, lambda: self.status_var.set("🖼️ Extracting ALL frames (Full Video)..."))
+                cmd = [ffmpeg, "-y", "-i", actual_temp_vid, os.path.join(temp_frames, "frame%08d.png")]
+            else:
+                self.after(0, lambda: self.status_var.set(f"🖼️ Extracting range {start_ts} to {end_ts}..."))
+                # Use -ss and -to for range extraction
+                cmd = [ffmpeg, "-y", "-ss", start_ts]
+                if end_ts != "00:00:00":
+                    cmd += ["-to", end_ts]
+                cmd += ["-i", actual_temp_vid, os.path.join(temp_frames, "frame%08d.png")]
 
-            self.after(0, lambda: self.status_var.set(f"🖼️ Extracting frames from {time_offset}..."))
-            # Use -ss BEFORE -i for fast seeking
-            subprocess.run([ffmpeg, "-y", "-ss", time_offset, "-i", actual_temp_vid, "-frames:v", "60", os.path.join(temp_frames, "frame%08d.png")], startupinfo=si, check=True)
+            subprocess.run(cmd, startupinfo=si, check=True)
             
             self.after(0, lambda: self.status_var.set("🔺 AI Upscaling frames..."))
             scale = 2 if "2x" in self.upscale_var.get() else 4
             
             # Universal Upscale Fallback
-            if GLOBAL_HW["has_cuda"]:
+            if check_ai_ready():
                 subprocess.run([realesrgan, "-i", temp_frames, "-o", output_dir, "-n", "realesr-animevideov3", "-s", str(scale)], 
                                cwd=os.path.dirname(os.path.abspath(realesrgan)), startupinfo=si, check=True)
             else:
@@ -959,7 +1058,7 @@ class TikTokFrameUpscalerTab(tk.Frame):
             self.after(0, lambda: self.status_var.set("Done ✓"))
             os.startfile(output_dir)
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Error", str(e)))
         finally:
             self.is_active = False
             self.after(0, lambda: self.dl_btn.config(text="🚀   START FRAME EXTRACTION", state="normal", bg=ACCENT))
@@ -1896,6 +1995,15 @@ class AIObjectRemoverTab(tk.Frame):
 
 # --- Globals and Utilities ---
 
+def get_ytdlp_base_args():
+    return [
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        "--no-check-certificates",
+        "--add-header", "Referer:https://www.tiktok.com/",
+        "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "--add-header", "Accept-Language:en-US,en;q=0.9",
+    ]
+
 REALESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip"
 
 BG      = "#0d0d0f"
@@ -2101,6 +2209,7 @@ class SettingsTab(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=BG)
         self.gpu_var = tk.BooleanVar(value=GLOBAL_SETTINGS.get("prefer_gpu"))
+        self.force_gpu_var = tk.BooleanVar(value=GLOBAL_SETTINGS.get("force_gpu"))
         self.batch_var = tk.IntVar(value=GLOBAL_SETTINGS.get("batch_size"))
         self._build_ui()
 
@@ -2122,14 +2231,22 @@ class SettingsTab(tk.Frame):
         section1 = tk.LabelFrame(main_c, text=" HARDWARE ACCELERATION ", font=("Segoe UI", 10, "bold"), bg=BG2, fg=ACCENT2, padx=20, pady=20)
         section1.pack(fill="x", pady=(0, 20))
         
-        tk.Label(section1, text="Detected GPU:", bg=BG2, fg=SUBTEXT).grid(row=0, column=0, sticky="w")
-        tk.Label(section1, text=f"{GLOBAL_HW['gpu_name']}", bg=BG2, fg=TEXT, font=("Segoe UI", 9, "bold")).grid(row=0, column=1, sticky="w", padx=10)
+        self.gpu_lbl = tk.Label(section1, text=f"Detected GPU: {GLOBAL_HW['gpu_name']}", bg=BG2, fg=TEXT, font=("Segoe UI", 9, "bold"))
+        self.gpu_lbl.grid(row=0, column=0, sticky="w")
+        
+        tk.Button(section1, text="🔍 RE-SCAN HARDWARE", font=("Segoe UI", 8, "bold"), bg=BG3, fg=ACCENT2, relief="flat", padx=10, command=self._rescan_hardware).grid(row=0, column=1, padx=20)
         
         gpu_cb = tk.Checkbutton(section1, text="Use NVIDIA GPU (CUDA) for AI Processing", variable=self.gpu_var, 
                                 bg=BG2, fg=SUCCESS, font=("Segoe UI", 10, "bold"), activebackground=BG2, activeforeground=SUCCESS,
                                 command=self._on_change)
         gpu_cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=(15, 5))
-        tk.Label(section1, text="Disabling this will force all AI tasks to run on the CPU (Much Slower).", bg=BG2, fg=SUBTEXT, font=("Segoe UI", 8)).grid(row=2, column=0, columnspan=2, sticky="w")
+        
+        force_cb = tk.Checkbutton(section1, text="Force AI (GPU) Mode (Ignore detection results)", variable=self.force_gpu_var, 
+                                bg=BG2, fg=WARN, font=("Segoe UI", 10, "bold"), activebackground=BG2, activeforeground=WARN,
+                                command=self._on_change)
+        force_cb.grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 5))
+        
+        tk.Label(section1, text="* Enable 'Force AI Mode' if your GPU is not detected but you know it supports Vulkan/CUDA.", bg=BG2, fg=SUBTEXT, font=("Segoe UI", 8)).grid(row=3, column=0, columnspan=2, sticky="w")
 
         # Performance Section
         section2 = tk.LabelFrame(main_c, text=" VIDEO PERFORMANCE (PRO STREAM) ", font=("Segoe UI", 10, "bold"), bg=BG2, fg=SUCCESS, padx=20, pady=20)
@@ -2142,20 +2259,29 @@ class SettingsTab(tk.Frame):
         
         tk.Label(main_c, text="* Settings are saved automatically.", font=("Segoe UI", 8, "italic"), bg=BG2, fg=SUBTEXT).pack(pady=20)
 
-        # NEW: Troubleshooting Section
+        # Troubleshooting Section
         section3 = tk.LabelFrame(main_c, text=" TROUBLESHOOTING & REPAIR ", font=("Segoe UI", 10, "bold"), bg=BG2, fg=WARN, padx=20, pady=20)
         section3.pack(fill="x", pady=(0, 20))
         
-        tk.Label(section3, text="Fix missing AI libraries, redownload core dependencies, and rebuild the application CLI/Python environment.", bg=BG2, fg=SUBTEXT, font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(section3, text="Fix missing AI libraries and update components.", bg=BG2, fg=SUBTEXT, font=("Segoe UI", 9)).pack(side="left")
         
-        tk.Button(section3, text="🔧 Run System Repair", font=("Segoe UI", 9, "bold"), bg=WARN, fg=BG, relief="flat", cursor="hand2", activebackground=ACCENT, padx=15, pady=5, command=lambda: self.winfo_toplevel()._run_system_repair()).pack(side="right", padx=10)
-        
-        tk.Button(section3, text="📜 Create Local Cert", font=("Segoe UI", 9, "bold"), bg=ACCENT2, fg=BG, relief="flat", cursor="hand2", activebackground=ACCENT, padx=15, pady=5, command=lambda: self.winfo_toplevel()._create_local_certificate()).pack(side="right", padx=10)
+        tk.Button(section3, text="🔧 System Repair", font=("Segoe UI", 9, "bold"), bg=WARN, fg=BG, relief="flat", cursor="hand2", activebackground=ACCENT, padx=15, pady=5, command=lambda: self.winfo_toplevel()._run_system_repair()).pack(side="right", padx=10)
+        tk.Button(section3, text="📥 Update yt-dlp", font=("Segoe UI", 9, "bold"), bg=SUCCESS, fg=BG, relief="flat", cursor="hand2", activebackground=ACCENT, padx=15, pady=5, command=lambda: self.winfo_toplevel()._update_ytdlp()).pack(side="right", padx=10)
+
+    def _rescan_hardware(self):
+        global GLOBAL_HW
+        messagebox.showinfo("Hardware Probe", "Scanning system for AI hardware... Please wait 5-10 seconds.")
+        GLOBAL_HW = HardwareManager.get_info()
+        self.gpu_lbl.config(text=f"Detected GPU: {GLOBAL_HW['gpu_name']}")
+        if GLOBAL_HW['has_cuda']:
+            messagebox.showinfo("Success", f"GPU Detected: {GLOBAL_HW['gpu_name']}\nAI Acceleration enabled!")
+        else:
+            messagebox.showwarning("No GPU Found", "System could not find a compatible GPU. You can try 'Force AI Mode' if you have one.")
 
     def _on_change(self):
         GLOBAL_SETTINGS.set("prefer_gpu", self.gpu_var.get())
+        GLOBAL_SETTINGS.set("force_gpu", self.force_gpu_var.get())
         GLOBAL_SETTINGS.set("batch_size", self.batch_var.get())
-        messagebox.showinfo("Settings Saved", "Hardware settings updated. Please restart the AI process for changes to take effect.")
 
 class VideoDrawTab(tk.Frame):
     def __init__(self, parent):
@@ -2691,6 +2817,44 @@ class TikTokDownloader(tk.Tk):
         # Initialize hardware detection
         threading.Thread(target=self._auto_tune_hardware, daemon=True).start()
         self.after(500, self._auto_setup) 
+
+    def _update_ytdlp(self):
+        """Update yt-dlp to the latest version to fix extraction issues."""
+        ytdlp = find_tool("yt-dlp")
+        if not ytdlp:
+            messagebox.showerror("Error", "yt-dlp.exe not found. Please wait for the initial setup to complete.")
+            return
+
+        self.after(0, lambda: self.dl_status_var.set("Updating yt-dlp... Please wait."))
+        
+        def run_update():
+            try:
+                si = None
+                if os.name == 'nt':
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                
+                # yt-dlp is pip-installed — use pip to update to latest nightly for TikTok fixes
+                python_exe = sys.executable
+                proc = subprocess.run(
+                    [python_exe, "-m", "pip", "install", "-U", "--pre", "yt-dlp[default]"],
+                    startupinfo=si, capture_output=True, text=True
+                )
+                output = proc.stdout + proc.stderr
+                if proc.returncode == 0 or "Successfully installed" in output or "already satisfied" in output.lower():
+                    # Get new version
+                    ver_proc = subprocess.run([ytdlp, "--version"], capture_output=True, text=True)
+                    ver = ver_proc.stdout.strip()
+                    self.after(0, lambda v=ver: messagebox.showinfo("Update Success", f"yt-dlp updated!\nCurrent version: {v}"))
+                    self.after(0, lambda: self.dl_status_var.set("yt-dlp Updated ✓"))
+                else:
+                    self.after(0, lambda o=output: messagebox.showerror("Update Error", o[:800]))
+                    self.after(0, lambda: self.dl_status_var.set("Update Failed ❌"))
+            except Exception as e:
+                self.after(0, lambda m=str(e): messagebox.showerror("Error", f"Failed to update: {m}"))
+                self.after(0, lambda: self.dl_status_var.set("Update Error ❌"))
+
+        threading.Thread(target=run_update, daemon=True).start()
 
     def _create_local_certificate(self):
         """Generate a local self-signed certificate for code signing."""
@@ -3274,7 +3438,7 @@ class TikTokDownloader(tk.Tk):
         if not ytdlp: return
         
         try:
-            cmd = [ytdlp, "--quiet", "--no-warnings", "--dump-json", url]
+            cmd = [ytdlp] + get_ytdlp_base_args() + ["--quiet", "--no-warnings", "--dump-json", url]
             si = None
             if os.name == 'nt':
                 si = subprocess.STARTUPINFO()
@@ -3388,7 +3552,7 @@ class TikTokDownloader(tk.Tk):
             return
             
         self.is_up_active = True
-        self.local_btn.config(text="⏳ PROCESSING...", state="disabled", bg="#444")
+        self.local_btn.config(text="⌛ PROCESSING...", state="disabled", bg="#444")
         self.up_progress_var.set(0)
         
         threading.Thread(target=self._process_local_queue, daemon=True).start()
@@ -3849,7 +4013,7 @@ class TikTokDownloader(tk.Tk):
             messagebox.showwarning("Warning", "Please enter a valid video URL")
             return
         self.is_dl_active = True
-        self.dl_btn.config(text="⏳ Working...", state="disabled", bg="#444")
+        self.dl_btn.config(text="⌛ PROCESSING...", state="disabled", bg="#444")
         self.cancel_btn1.pack(side="right", padx=(10, 0), fill="y")
         self.dl_progress_var.set(0)
         self.info_lbl1.config(text="")
