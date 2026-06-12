@@ -446,6 +446,8 @@ class TiktokTranslatorTab(tk.Frame):
         self.lang_cb.pack(fill="x", pady=(4, 0))
         self.trans_btn = tk.Button(card, text="🚀  START TRANSLATION", font=("Impact", 14), bg=ACCENT, fg=TEXT, relief="flat", cursor="hand2", pady=12, command=self._start_translation)
         self.trans_btn.pack(fill="x", pady=(0, 20))
+        self.cancel_btn = tk.Button(card, text="🚫  CANCEL TRANSLATION", font=("Segoe UI", 10, "bold"), bg="#444", fg=TEXT, relief="flat", cursor="hand2", pady=10, command=self._cancel_translation)
+        # Hidden by default
         tk.Label(card, text="📝  Result Text:", font=("Segoe UI", 10, "bold"), fg=ACCENT2, bg=BG2, anchor="w").pack(fill="x")
         res_frame = tk.Frame(card, bg=BG3, pady=2)
         res_frame.pack(fill="both", expand=True, pady=(8, 8))
@@ -904,7 +906,7 @@ class TikTokFrameUpscalerTab(tk.Frame):
         self.end_h_var    = tk.StringVar(value="00")
         self.end_m_var    = tk.StringVar(value="00")
         self.end_s_var    = tk.StringVar(value="00")
-        self.upscale_var  = tk.StringVar(value="🔺 2x (Fast)")
+        self.upscale_var  = tk.StringVar(value="❌ No Upscale")
         self.is_active    = False
         self._build_ui()
 
@@ -925,7 +927,7 @@ class TikTokFrameUpscalerTab(tk.Frame):
         url_frame.pack(fill="x", pady=(4, 12))
         self.url_entry = tk.Entry(url_frame, font=("Consolas", 11), bg=BG3, fg=TEXT, insertbackground=ACCENT2, relief="flat", bd=8)
         self.url_entry.pack(fill="x", padx=4)
-        self.u_cb = ttk.Combobox(card, textvariable=self.upscale_var, values=["🔺 2x (Fast)", "🔺🔺 4x (Pro)"], state="readonly", style="T.TCombobox")
+        self.u_cb = ttk.Combobox(card, textvariable=self.upscale_var, values=["❌ No Upscale", "🔺 2x (Fast)", "🔺🔺 4x (Ultra HD)"], state="readonly", style="T.TCombobox")
         self.u_cb.pack(fill="x", pady=(4, 12))
 
         # Time Offset (New Feature)
@@ -1004,7 +1006,10 @@ class TikTokFrameUpscalerTab(tk.Frame):
                 si = subprocess.STARTUPINFO()
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-            subprocess.run([ytdlp] + get_ytdlp_base_args() + [url, "--format", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", temp_vid], startupinfo=si, check=True)
+            self.current_proc = subprocess.Popen([ytdlp] + get_ytdlp_base_args() + [url, "--format", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", temp_vid], startupinfo=si)
+            self.current_proc.communicate()
+            if self.is_cancelled: return
+            if self.current_proc.returncode != 0: raise Exception("Download failed")
             
             # Find the actual downloaded file (yt-dlp might change extension)
             downloaded_files = glob.glob(os.path.join(output_dir, "temp.*"))
@@ -1031,34 +1036,49 @@ class TikTokFrameUpscalerTab(tk.Frame):
                     cmd += ["-to", end_ts]
                 cmd += ["-i", actual_temp_vid, os.path.join(temp_frames, "frame%08d.png")]
 
-            subprocess.run(cmd, startupinfo=si, check=True)
+            self.current_proc = subprocess.Popen(cmd, startupinfo=si)
+            self.current_proc.communicate()
+            if self.is_cancelled: return
+            if self.current_proc.returncode != 0: raise Exception("Extraction failed")
             
-            self.after(0, lambda: self.status_var.set("🔺 AI Upscaling frames..."))
-            scale = 2 if "2x" in self.upscale_var.get() else 4
-            
-            # Universal Upscale Fallback
-            if check_ai_ready():
-                subprocess.run([realesrgan, "-i", temp_frames, "-o", output_dir, "-n", "realesr-animevideov3", "-s", str(scale)], 
-                               cwd=os.path.dirname(os.path.abspath(realesrgan)), startupinfo=si, check=True)
-            else:
-                self.after(0, lambda: self.status_var.set("🔺 CPU Upscaling (Compatibility Mode)..."))
-                # Use standard high-quality resize for machines without GPU
-                # Iterating through temp_frames
+            if "No Upscale" in self.upscale_var.get():
+                self.after(0, lambda: self.status_var.set("✅ Saving original frames..."))
                 for f in os.listdir(temp_frames):
-                    if self.is_cancelled: break
+                    if self.is_cancelled: return
                     if f.endswith(".png"):
-                        f_path = os.path.join(temp_frames, f)
-                        with Image.open(f_path) as img:
-                            w, h = img.size
-                            res = img.resize((w*scale, h*scale), Image.Resampling.LANCZOS)
-                            res.save(os.path.join(output_dir, f))
+                        shutil.move(os.path.join(temp_frames, f), os.path.join(output_dir, f))
+            else:
+                self.after(0, lambda: self.status_var.set("🔺 AI Upscaling frames..."))
+                scale = 2 if "2x" in self.upscale_var.get() else 4
+                
+                # Universal Upscale Fallback
+                if check_ai_ready():
+                    self.current_proc = subprocess.Popen([realesrgan, "-i", temp_frames, "-o", output_dir, "-n", "realesr-animevideov3", "-s", str(scale)], 
+                                   cwd=os.path.dirname(os.path.abspath(realesrgan)), startupinfo=si)
+                    self.current_proc.communicate()
+                    if self.is_cancelled: return
+                    if self.current_proc.returncode != 0: raise Exception("Upscale failed")
+                else:
+                    self.after(0, lambda: self.status_var.set("🔺 CPU Upscaling (Compatibility Mode)..."))
+                    # Use standard high-quality resize for machines without GPU
+                    # Iterating through temp_frames
+                    for f in os.listdir(temp_frames):
+                        if self.is_cancelled: break
+                        if f.endswith(".png"):
+                            f_path = os.path.join(temp_frames, f)
+                            with Image.open(f_path) as img:
+                                w, h = img.size
+                                res = img.resize((w*scale, h*scale), Image.Resampling.LANCZOS)
+                                res.save(os.path.join(output_dir, f))
             
             if os.path.exists(actual_temp_vid): os.remove(actual_temp_vid)
             shutil.rmtree(temp_frames, ignore_errors=True)
+            if self.is_cancelled: return
             self.after(0, lambda: self.status_var.set("Done ✓"))
             os.startfile(output_dir)
         except Exception as e:
-            self.after(0, lambda e=e: messagebox.showerror("Error", str(e)))
+            if not getattr(self, 'is_cancelled', False):
+                self.after(0, lambda e=e: messagebox.showerror("Error", str(e)))
         finally:
             self.is_active = False
             self.after(0, lambda: self.dl_btn.config(text="🚀   START FRAME EXTRACTION", state="normal", bg=ACCENT))
@@ -4338,3 +4358,4 @@ class TikTokDownloader(tk.Tk):
 if __name__ == "__main__":
     app = TikTokDownloader()
     app.mainloop()
+

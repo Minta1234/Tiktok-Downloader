@@ -10,4 +10,9 @@ bin/big-lama.pt
 *.pt
 *.pth
 *.onnx
+bin/*
 
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
