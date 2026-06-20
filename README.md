@@ -79,6 +79,73 @@ Find similar images in your local library.
 
 ---
 
+## 🐳 Run with Docker (Linux / Cross-Platform)
+
+Docker runs the app inside a container with a **virtual display (Xvfb)** streamed over **VNC**, so you can use the full GUI on any OS.
+
+### Prerequisites
+*   [Docker](https://docs.docker.com/get-docker/) installed
+*   Any VNC viewer — e.g. [RealVNC Viewer](https://www.realvnc.com/en/connect/download/viewer/) (free) or TigerVNC
+
+### 1. Build & Start
+```bash
+# Build the image and start the container
+docker compose up --build
+```
+> First build downloads PyTorch + all dependencies — expect ~5-10 min on first run.
+
+### 2. Connect via VNC
+Open your VNC viewer and connect to:
+```
+Address : localhost:5900
+Password: (leave empty — no password by default)
+```
+The **AI Media Suite** GUI will appear in the VNC window.
+
+### 3. Set a VNC Password (Optional but Recommended)
+Edit `docker-compose.yml` and set the `VNC_PASS` variable:
+```yaml
+environment:
+  - VNC_PASS=mypassword123
+```
+Then restart:
+```bash
+docker compose down && docker compose up
+```
+
+### 4. Access Downloaded Files
+Files saved by the app appear in the `./downloads/` folder next to the project (mapped to `/root/Downloads` inside the container).
+
+### GPU / CUDA Support
+By default, Docker uses **CPU-only PyTorch**. To enable CUDA (NVIDIA GPU):
+1.  Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+2.  In `Dockerfile`, replace the torch install line:
+    ```dockerfile
+    # CPU (default)
+    RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+    # GPU / CUDA 12.1
+    RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    ```
+3.  Add GPU access to `docker-compose.yml`:
+    ```yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ```
+4.  Rebuild: `docker compose up --build`
+
+### Stop the Container
+```bash
+docker compose down
+```
+
+---
+
 ---
 
 ## 🤝 Support

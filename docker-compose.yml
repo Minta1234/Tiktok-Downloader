@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  ai-media-suite:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-media-suite:latest
+    container_name: ai-media-suite
+
+    environment:
+      # Virtual display number (leave as default)
+      - DISPLAY_NUM=99
+      # VNC port inside the container
+      - VNC_PORT=5900
+      # Set a VNC password (leave empty for no password)
+      - VNC_PASS=
+
+    ports:
+      # Map host port 5900 -> container VNC port 5900
+      # Connect with any VNC viewer to localhost:5900
+      - "5900:5900"
+
+    volumes:
+      # Mount a host folder so downloaded files persist outside the container
+      - ./downloads:/root/Downloads
+
+    restart: unless-stopped
