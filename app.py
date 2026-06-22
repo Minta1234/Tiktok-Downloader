@@ -55,6 +55,7 @@ if getattr(sys, 'frozen', False):
         sys.path.insert(0, _app_dir)
 
 try:
+    # pyrefly: ignore [missing-import]
     import torch
     HAS_TORCH = True
 except ImportError:
