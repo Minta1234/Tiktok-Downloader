@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tk-dev \
     xvfb \
     x11vnc \
+    x11-apps \
     xterm \
     # Media tools
     ffmpeg \
@@ -50,38 +51,11 @@ RUN grep -v '^\s*#' requirements.txt | grep -v '^\s*$' | pip install --no-cache-
 
 # --- Copy application source ---
 COPY app.py .
-COPY extract_json.py .
-COPY debug_tiktok.py .
-# Copy the bin/ directory (Real-ESRGAN binary, etc.) if present
-COPY bin/ ./bin/
 
 # --- VNC startup script ---
 # Creates a virtual display, launches the app, and starts a VNC server
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-DISPLAY_NUM=${DISPLAY_NUM:-99}\n\
-VNC_PORT=${VNC_PORT:-5900}\n\
-VNC_PASS=${VNC_PASS:-""}\n\
-\n\
-echo "[*] Starting Xvfb on :$DISPLAY_NUM"\n\
-Xvfb :$DISPLAY_NUM -screen 0 1280x800x24 &\n\
-XVFB_PID=$!\n\
-export DISPLAY=:$DISPLAY_NUM\n\
-sleep 1\n\
-\n\
-echo "[*] Starting x11vnc on port $VNC_PORT"\n\
-if [ -n "$VNC_PASS" ]; then\n\
-    x11vnc -display :$DISPLAY_NUM -forever -rfbport $VNC_PORT -passwd "$VNC_PASS" &\n\
-else\n\
-    x11vnc -display :$DISPLAY_NUM -forever -rfbport $VNC_PORT -nopw &\n\
-fi\n\
-\n\
-echo "[*] Launching AI Media Suite..."\n\
-python /app/app.py\n\
-\n\
-wait $XVFB_PID\n\
-' > /start.sh && chmod +x /start.sh
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
 # --- Expose VNC port ---
 EXPOSE 5900

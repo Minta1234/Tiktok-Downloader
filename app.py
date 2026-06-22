@@ -2800,7 +2800,11 @@ class TikTokDownloader(tk.Tk):
         super().__init__()
         self.title("Pro Media Suite — Single File Edition 2.0")
         self.geometry("1024x720")
-        self.state("zoomed")
+        # "zoomed" is Windows-only; use attributes for cross-platform maximize
+        try:
+            self.state("zoomed")  # Windows
+        except Exception:
+            self.attributes("-zoomed", True)  # Linux / Xvfb
         self.resizable(True, True)
         self.minsize(1024, 720)
         self.configure(bg=BG)

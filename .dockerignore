@@ -17,6 +17,10 @@ extract_json.py
 *.json
 *.html
 
+# Windows-only binaries — excluded from Docker (Linux doesn't use .exe files)
+# yt-dlp and ffmpeg are installed natively inside the container
+bin/
+
 # Compiled installer
 BuildInstaller.iss
 *.exe
@@ -26,6 +30,31 @@ BuildInstaller.iss
 icon.ico
 
 # Docker itself
+Dockerfile
+docker-compose.yml
+.dockerignore
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Dev / debug files
+debug_tiktok.py
+extract_json.py
+*.json
+*.html
+
+# Compiled installer
+BuildInstaller.iss
+*.exe
+*.iss
+
+# Icon (not needed at runtime)
+icon.ico
+
+# Docker itself (keep start.sh - it IS needed by the build)
 Dockerfile
 docker-compose.yml
 .dockerignore
