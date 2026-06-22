@@ -1125,6 +1125,7 @@ class LamaInpainter:
         x0, y0, x1, y1 = max(0, bbox[0]-pad), max(0, bbox[1]-pad), min(orig_w, bbox[2]+pad), min(orig_h, bbox[3]+pad)
         
         # Prepare Batch
+        # pyrefly: ignore [missing-import]
         import torchvision.transforms.functional as F
         import cv2
         import numpy as np
