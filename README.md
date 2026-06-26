@@ -4,6 +4,7 @@ A high-performance, AI-powered desktop application for media professionals. This
 
 ![Version](https://img.shields.io/badge/Version-1.0.0-fe2c55?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.10+-25f4ee?style=for-the-badge)
+![OS](https://img.shields.io/badge/Windows11)
 
 ---
 
